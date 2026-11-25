@@ -1,0 +1,71 @@
+{
+  "project": "OmniFetch",
+  "source_mode": "brand_existing",
+  "archetype": "industrial-precision",
+  "optional_accent": "tactile-native",
+  "design_read": "Operate (macOS native daily utility) x multi-stream media acquisition tool x Precision Instrument (optical studio hardware) x single anchor: live throughput progress track & tabular telemetry in the download queue.",
+  "palette": {
+    "neutral_tint_hue": 215,
+    "distinct_color_count": 6,
+    "light": {
+      "canvas": "#F6F8F9",
+      "surface": "#EBF0F2",
+      "text_primary": "#162026",
+      "text_muted": "#4F606A",
+      "accent": "#0B6E77",
+      "accent_ink": "#F6F8F9",
+      "danger": "#B93827"
+    },
+    "dark": {
+      "canvas": "#12171A",
+      "surface": "#1B2227",
+      "text_primary": "#E8EEF2",
+      "text_muted": "#8E9FA9",
+      "accent": "#3BBCC7",
+      "accent_ink": "#12171A",
+      "danger": "#EE7262"
+    },
+    "roles": {
+      "canvas": "#F6F8F9",
+      "surface": "#EBF0F2",
+      "text_primary": "#162026",
+      "text_muted": "#4F606A",
+      "accent": "#0B6E77",
+      "status_secondary": "#B93827"
+    }
+  },
+  "typography": {
+    "heading_stack": "SF Pro Display, PingFang SC, system-ui",
+    "body_stack": "SF Pro Text, PingFang SC, system-ui",
+    "mono_stack": "SF Mono, Menlo, monospace",
+    "tabular_nums": true,
+    "scale_pt": {
+      "window_title": 15,
+      "sheet_title": 17,
+      "row_title": 13.5,
+      "body": 13,
+      "meta": 11.5,
+      "badge": 11
+    }
+  },
+  "geometry_and_material": {
+    "density": "comfortable",
+    "radius_base": "sharp-mac (sm:6 / md:10 / lg:14 / pill:999)",
+    "depth_strategy": "hairline-and-surface",
+    "spacing_grid_pt": [4, 8, 12, 16, 24, 32]
+  },
+  "motion_budget": {
+    "press_response_ms": 120,
+    "state_transition_ms": 180,
+    "panel_spring": "response 0.26, dampingFraction 0.94",
+    "keyboard_nav_ms": 0,
+    "reduce_motion_fallback": "opacity 150ms easeOut, no translation or pulse"
+  },
+  "guardrails": [
+    "Strict <= 6 distinct colors per frame/screen (5 normal + 1 danger only on faults).",
+    "No purple/indigo (OKLCH 270-330), no warm-cream+terracotta cliché, no pure #000/#FFF ink.",
+    "No ghost cards (never combine 1px border with >=16px blur shadow); use surface contrast + 1px ink hairlines.",
+    "Status triple-coded by icon + label + tone so grayscale screenshot stays 100% legible.",
+    "All dynamic numbers (speed, bytes, percent, ETA, counts) enforce monospacedDigit()."
+  ]
+}

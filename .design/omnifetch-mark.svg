@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="omnifetch-title omnifetch-desc">
+  <title id="omnifetch-title">OmniFetch Brand Mark</title>
+  <desc id="omnifetch-desc">Optical Aperture Collimator mark: twin symmetric 104-degree signal teal lens arcs framing a machined silver downward fetch arrow on an anodized slate squircle.</desc>
+  <defs>
+    <linearGradient id="bgSlate" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#242F37"/>
+      <stop offset="48%" stop-color="#161D23"/>
+      <stop offset="100%" stop-color="#0C1115"/>
+    </linearGradient>
+    <linearGradient id="chamberGrad" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#080C0F"/>
+      <stop offset="100%" stop-color="#182129"/>
+    </linearGradient>
+    <linearGradient id="tealArc" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#4ED2DD"/>
+      <stop offset="52%" stop-color="#1E9BA7"/>
+      <stop offset="100%" stop-color="#0C6873"/>
+    </linearGradient>
+    <linearGradient id="silverArrow" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#F5F9FB"/>
+      <stop offset="100%" stop-color="#C6D3DC"/>
+    </linearGradient>
+    <linearGradient id="rimLight" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#E8EEF2" stop-opacity="0.24"/>
+      <stop offset="30%" stop-color="#E8EEF2" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.32"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Continuous macOS squircle shell -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bgSlate)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="183.5" fill="none" stroke="url(#rimLight)" stroke-width="3"/>
+
+  <!-- Recessed optical lens chamber -->
+  <circle cx="512" cy="512" r="342" fill="url(#chamberGrad)"/>
+  <circle cx="512" cy="512" r="341" fill="none" stroke="#E8EEF2" stroke-opacity="0.06" stroke-width="2"/>
+
+  <!-- Twin symmetric Optical Signal Teal collimator arcs (open at 12 & 6 o'clock) -->
+  <g fill="none" stroke="url(#tealArc)" stroke-width="72" stroke-linecap="round">
+    <!-- Left arc: 128 deg to 232 deg (SVG y-down: top-left to bottom-left) -->
+    <path d="M 353 309 A 258 258 0 0 0 353 715"/>
+    <!-- Right arc: top-right to bottom-right -->
+    <path d="M 671 309 A 258 258 0 0 1 671 715"/>
+  </g>
+
+  <!-- Machined Mist-Silver downward fetch conduit arrow -->
+  <g fill="none" stroke="url(#silverArrow)" stroke-width="68" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="512" y1="268" x2="512" y2="710"/>
+    <polyline points="388,596 512,720 636,596"/>
+  </g>
+</svg>

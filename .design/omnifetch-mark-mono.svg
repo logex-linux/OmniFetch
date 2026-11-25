@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="mono-title">
+  <title id="mono-title">OmniFetch Monochrome Silhouette Mark</title>
+  <g fill="none" stroke="#162026" stroke-width="72" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 353 309 A 258 258 0 0 0 353 715"/>
+    <path d="M 671 309 A 258 258 0 0 1 671 715"/>
+    <line x1="512" y1="268" x2="512" y2="710"/>
+    <polyline points="388,596 512,720 636,596"/>
+  </g>
+</svg>
