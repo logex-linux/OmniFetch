@@ -104,14 +104,21 @@ SwiftUI 界面直接调用 `OmniFetchCore`。后续 Windows Electron 界面可�
 - 批量链接和多分 P 视频一次入队、一次写入任务历史。全部暂停和恢复也只写一次；快速恢复会等旧写入结束再启动。
 - yt-dlp/ffmpeg 子进程按 utility QoS 运行，stdout 边读边解析，避免管道写满导致卡死。
 
-## 四、macOS 界面与打包分发
+## 四、桌面界面与打包分发
 
-可直接从 [GitHub Releases](https://github.com/logex-linux/OmniFetch/releases) 下载 `OmniFetch-1.0.0-universal.dmg`（Apple Silicon + Intel 通用版），或在仓库根目录本地打包并安装到 `/Applications`：
+- **macOS**：从 [GitHub Releases](https://github.com/logex-linux/OmniFetch/releases) 下载 `OmniFetch-1.0.0-universal.dmg`（Apple Silicon + Intel 通用版），或在仓库根目录本地打包并安装到 `/Applications`：
 
 ```bash
 ./scripts/build_app.sh              # 本机架构 .app
 ./scripts/build_dmg.sh --install    # Universal (arm64 + x86_64) .app + .dmg 并安装到 /Applications
 open /Applications/OmniFetch.app
+```
+
+- **Windows（Qt 6）**：源码位于 `windows/`，与 macOS 共享同一套 Visual DNA（冷矿物灰 + 光学青，浅/深自动跟随系统）。可直接从 [GitHub Releases](https://github.com/logex-linux/OmniFetch/releases) 下载单文件 `OmniFetch-1.0.0-windows-x64.exe`，或在 Windows 上本地封装：
+
+```powershell
+cd windows
+.\build_windows.ps1                 # 生成 dist\OmniFetch-1.0.0-windows-x64.exe
 ```
 
 构建 Release CLI 后，可运行 `python3 scripts/check_social_engines.py`，在本地核验批量输入、JSON 输出、预览复用、文件完整性和合集失败后的恢复。传入 `--baseline /path/to/old/OmniFetch` 可对照旧版的源页面请求次数与耗时。该检查使用 `PATH` 中的 yt-dlp 和 ffmpeg。

@@ -2,3 +2,8 @@
 build/
 .DS_Store
 *.xcuserstate
+__pycache__/
+*.pyc
+windows/.venv/
+windows/build/
+windows/dist/

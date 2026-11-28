@@ -1,0 +1,84 @@
+name: Build Windows Qt EXE
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "GitHub Release tag to attach the .exe to"
+        required: false
+        default: "v1.0.0"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: windows/requirements.txt
+
+      - name: Install PySide6 and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r windows/requirements.txt
+
+      - name: Resolve release version
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.release_tag }}"
+          if (-not $tag) {
+            if ("${{ github.ref_type }}" -eq "tag") {
+              $tag = "${{ github.ref_name }}"
+            } else {
+              $tag = "v1.0.0"
+            }
+          }
+          $version = $tag.TrimStart("v")
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build single-file OmniFetch.exe
+        shell: pwsh
+        working-directory: windows
+        run: |
+          pyinstaller --clean --noconfirm OmniFetch.spec
+          $outExe = "dist\OmniFetch-${{ steps.ver.outputs.version }}-windows-x64.exe"
+          Copy-Item "dist\OmniFetch.exe" $outExe -Force
+          $hash = (Get-FileHash $outExe -Algorithm SHA256).Hash.ToLower()
+          "$hash  OmniFetch-${{ steps.ver.outputs.version }}-windows-x64.exe" | Out-File -Encoding ascii "dist\SHA256SUMS-windows.txt"
+          Get-Item $outExe | Format-List Name, Length
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OmniFetch-windows-x64-exe
+          path: |
+            windows/dist/OmniFetch-*-windows-x64.exe
+            windows/dist/SHA256SUMS-windows.txt
+
+      - name: Attach .exe to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.ver.outputs.tag }}"
+          $exe = "windows/dist/OmniFetch-${{ steps.ver.outputs.version }}-windows-x64.exe"
+          $sha = "windows/dist/SHA256SUMS-windows.txt"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $exe $sha --clobber
+          } else {
+            gh release create $tag $exe $sha --title "OmniFetch ${{ steps.ver.outputs.version }}" --notes "Windows x64 Qt 6 standalone executable."
+          }
