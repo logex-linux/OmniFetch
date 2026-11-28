@@ -469,12 +469,12 @@ struct AddDownloadView: View {
                     }
 
                     HStack {
-                        Text("单任务分片连接")
+                        Text("单任务并发上限")
                             .font(OmniFont.body)
                             .foregroundStyle(OmniColor.ink)
                         Spacer()
                         Stepper(value: $options.connections, in: 1...16) {
-                            Text("\(options.connections) 线程")
+                            Text("\(options.connections) 路")
                                 .font(OmniFont.telemetry)
                                 .foregroundStyle(OmniColor.ink)
                                 .frame(width: 56, alignment: .trailing)

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// One writer per range. The session's serial delegate queue owns the buffer
@@ -130,7 +131,8 @@ final class ChunkDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendab
             }
         }
         do {
-            if pending.isEmpty && data.count >= Self.flushThreshold {
+            if data.count >= Self.flushThreshold {
+                try flush()
                 try write(data)
             } else {
                 pending.append(data)
@@ -146,23 +148,25 @@ final class ChunkDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendab
     }
 
     private func write(_ data: Data) throws {
-        var offset = data.startIndex
-        while offset < data.endIndex {
-            let remaining = data.endIndex - offset
-            let count = limiter?.allowance(upTo: remaining, cancelled: { self.cancelled }) ?? remaining
-            guard count > 0 else { throw FetchError.cancelled }
-            do {
-                if count == data.count {
-                    try handle.write(contentsOf: data)
-                } else {
-                    try handle.write(contentsOf: data[offset..<(offset + count)])
+        try data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
+            guard let base = buffer.baseAddress else { return }
+            var offset = 0
+            while offset < buffer.count {
+                let remaining = buffer.count - offset
+                let count = limiter?.allowance(upTo: remaining, cancelled: { self.cancelled }) ?? remaining
+                guard count > 0 else { throw FetchError.cancelled }
+                // Write directly from the network buffer. A short write has
+                // already consumed its quota, so finish it before asking for more.
+                let end = offset + count
+                while offset < end {
+                    let n = Darwin.write(handle.fileDescriptor, base.advanced(by: offset), end - offset)
+                    if n < 0 && errno == EINTR { continue }
+                    guard n > 0 else { throw FetchError.disk(String(cString: strerror(n == 0 ? EIO : errno))) }
+                    offset += n
+                    bytesReceived += Int64(n)
+                    onBytes(n)
                 }
-            } catch {
-                throw FetchError.disk(error.localizedDescription)
             }
-            offset += count
-            bytesReceived += Int64(count)
-            onBytes(count)
             lastFlush = .now()
         }
     }

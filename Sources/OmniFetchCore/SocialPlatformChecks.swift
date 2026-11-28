@@ -95,6 +95,27 @@ extension SelfTest {
         expect("multi-video preview and per-entry quality", playlist.isItemCollection && playlist.extra["count"] == "2" &&
                YTDLPEngine.selector(for: request) == YTDLPEngine.selector(quality: "720", audioOnly: false))
         expect("unavailable playlists cannot succeed", (try? YTDLPEngine.mediaInfo(["_type":"playlist", "entries":[]], url: postURL, options: .init())) == nil)
+        let httpFormat: [String: Any] = ["url": "https://cdn.test/video.mp4", "ext": "mp4", "protocol": "https",
+                                        "format_id": "18", "acodec": "aac", "vcodec": "avc1", "filesize": 8_388_608, "height": 720]
+        func parallelFiles(_ overrides: [String: Any], options: DownloadOptions = DownloadOptions()) throws -> [RemoteFile]? {
+            var json = httpFormat
+            json["extractor_key"] = "Youtube"
+            json["formats"] = [httpFormat]
+            json.merge(overrides) { _, new in new }
+            let info = try YTDLPEngine.mediaInfo(json, url: postURL, options: options)
+            let job = DownloadRequest(info: info, options: options, destinationDirectory: FileManager.default.temporaryDirectory, baseName: "video")
+            return YTDLPEngine.parallelHTTPFiles(try JSONSerialization.data(withJSONObject: json), request: job)
+        }
+        expect("eligible HTTPS format retains extractor chunk limit",
+               try parallelFiles(["downloader_options": ["http_chunk_size": 1_048_576]])?.first?.maxRangeBytes == 1_048_576)
+        let delegated: [[String: Any]] = [
+            ["protocol": "m3u8_native"], ["section_start": 10], ["is_live": true], ["has_drm": true],
+            ["http_headers": ["Authorization": "fixture"]], ["downloader_options": ["other": true]],
+            ["availability": "private"], ["available_at": Date().timeIntervalSince1970 + 300]]
+        expect("special transports and restricted videos keep extractor handling", try delegated.allSatisfy { try parallelFiles($0) == nil })
+        expect("quality cap and unselected formats keep extractor selection",
+               try parallelFiles([:], options: DownloadOptions(quality: "360")) == nil &&
+               parallelFiles([:], options: DownloadOptions(formatID: "other")) == nil)
         expect("signed CDN rejects web response", HTTPProbe.isWebPage("Text/HTML; charset=UTF-8") && !HTTPProbe.isWebPage("video/mp4"))
         var settings = AppSettings()
         settings.cookieHeader = "example=dummy"

@@ -39,7 +39,8 @@ struct BenchmarkClient {
                 RemoteFile(url: root.appendingPathComponent("image-\(index).jpg"), kind: .image, fileExtension: "jpg")
             }
             let info = MediaInfo(title: "album", files: files, engineID: "xiaohongshu", extra: ["kind": "images"])
-            let request = DownloadRequest(info: info, options: DownloadOptions(),
+            let options = DownloadOptions(connections: args.count > 4 ? Int(args[4])! : 6)
+            let request = DownloadRequest(info: info, options: options,
                                           destinationDirectory: URL(fileURLWithPath: args[3]), baseName: "album")
             _ = try await XiaohongshuEngine().download(request) { _, _ in }
         }

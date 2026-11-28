@@ -143,9 +143,9 @@ struct SettingsView: View {
 
                 rowDivider
 
-                settingsRow(label: "每任务分片连接", caption: "单文件并发越高越快；同时下载过多任务会争抢带宽与磁盘 IO。") {
+                settingsRow(label: "每任务并发上限", caption: "用于视频分片、独立音视频轨和图集附件。实际并发取决于文件大小和来源。") {
                     Stepper(value: $draft.connectionsPerTask, in: 1...16) {
-                        Text("\(draft.connectionsPerTask) 线程")
+                        Text("\(draft.connectionsPerTask) 路")
                             .font(OmniFont.telemetry)
                             .foregroundStyle(OmniColor.ink)
                             .frame(width: 56, alignment: .trailing)

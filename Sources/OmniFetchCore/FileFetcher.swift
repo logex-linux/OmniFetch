@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Progress sink that keeps UI updates around 10 per second regardless of
@@ -52,6 +53,34 @@ private struct ResumeSidecar: Codable {
     var total: Int64
     var etag: String?     // remote version at the time the bytes were written
     var chunks: [Int64]   // bytes already written per chunk index
+
+    static func sourceID(_ source: URL) -> String {
+        "sha256:" + Data(SHA256.hash(data: Data(source.absoluteString.utf8))).base64EncodedString()
+    }
+
+    func matches(_ source: URL) -> Bool {
+        url == source.absoluteString || url == Self.sourceID(source)
+    }
+
+    // Reuse the old checkpoint format. A new grid is safe only if its prefixes
+    // can describe every byte already on disk, including disjoint ranges.
+    func offsets(for count: Int) -> [Int64]? {
+        if count == chunks.count { return chunks }
+        let oldWidth = total / Int64(chunks.count)
+        let newWidth = total / Int64(count)
+        let offsets = (0..<count).map { index -> Int64 in
+            let start = Int64(index) * newWidth
+            let end = index == count - 1 ? total : start + newWidth
+            var cursor = start
+            for (oldIndex, saved) in chunks.enumerated() {
+                let oldStart = Int64(oldIndex) * oldWidth
+                if oldStart > cursor || cursor >= end { break }
+                cursor = max(cursor, min(end, oldStart + saved))
+            }
+            return cursor - start
+        }
+        return offsets.reduce(0, +) == chunks.reduce(0, +) ? offsets : nil
+    }
 }
 
 public actor FileFetcher {
@@ -62,6 +91,11 @@ public actor FileFetcher {
     private let sharedLimiter = RateLimiter(bytesPerSecond: nil)
 
     public init() {}
+
+    static func parallelism(for size: Int64, connections: Int) -> Int {
+        let ceiling = size < 32 * 1024 * 1024 ? 4 : 16
+        return max(1, min(connections, ceiling, Int(size / (2 * 1024 * 1024))))
+    }
 
     /// Downloads a remote file, trying the CDN backups when the primary URL
     /// fails. Cancellation never triggers a failover.
@@ -130,8 +164,9 @@ public actor FileFetcher {
         }
         // A new single-stream file can learn its size and ETag from the body
         // request itself. Existing partial files still validate their sidecar.
-        let small = file.totalBytes.map { $0 > 0 && $0 < 8 * 1024 * 1024 } ?? false
-        if (connections == 1 || small), !fm.fileExists(atPath: destination.path) {
+        let single = file.totalBytes.map { $0 > 0 && Self.parallelism(for: $0, connections: connections) == 1 } ?? false
+        let needsRanges = file.maxRangeBytes.map { (file.totalBytes ?? Int64.max) > $0 } ?? false
+        if (connections <= 1 || single), !needsRanges, !fm.fileExists(atPath: destination.path) {
             do {
                 return try await downloadStream(file: file, headers: headers, to: destination,
                                                 expectedTotal: file.totalBytes, session: session,
@@ -171,6 +206,7 @@ public actor FileFetcher {
         }
 
         if probe?.acceptsRanges == false {
+            if let maxRange = file.maxRangeBytes, total > maxRange { throw FetchError.rangeUnsupported }
             return try await downloadStream(file: target, headers: headers, to: destination,
                                             expectedTotal: total, session: session, onProgress: onProgress)
         }
@@ -186,6 +222,7 @@ public actor FileFetcher {
                                          destination: destination,
                                          onProgress: onProgress)
         } catch let error as FetchError where Self.shouldFallBackToStream(error) {
+            if let maxRange = file.maxRangeBytes, total > maxRange { throw FetchError.rangeUnsupported }
             Log.write("range download failed (\(error.localizedDescription)); retrying as single stream")
             return try await downloadStream(file: target, headers: headers, to: destination,
                                             expectedTotal: total, session: session, onProgress: onProgress)
@@ -198,7 +235,7 @@ public actor FileFetcher {
         let sidecar = old.appendingPathExtension("omni-resume")
         guard !fm.fileExists(atPath: new.path), let data = try? Data(contentsOf: sidecar),
               let record = try? JSONDecoder().decode(ResumeSidecar.self, from: data),
-              record.url == file.url.absoluteString else { return }
+              record.matches(file.url) else { return }
         do {
             try fm.moveItem(at: old, to: new)
             try fm.moveItem(at: sidecar, to: new.appendingPathExtension("omni-resume"))
@@ -226,11 +263,7 @@ public actor FileFetcher {
                              destination: URL,
                              onProgress: @escaping @Sendable (Int64, Int64) -> Void) async throws -> URL {
         let fm = FileManager.default
-        var chunkCount = 1
-        if total >= 8 * 1024 * 1024 {
-            chunkCount = max(1, min(16, connections))
-            if total < 32 * 1024 * 1024 { chunkCount = min(chunkCount, 4) }
-        }
+        let parallelism = Self.parallelism(for: total, connections: connections)
 
         let gate = ProgressGate(total: total, emit: onProgress)
         let limiter = sharedLimiter
@@ -245,18 +278,13 @@ public actor FileFetcher {
         }
 
         let sidecarURL = destination.appendingPathExtension("omni-resume")
-        var previous = Self.loadSidecar(sidecarURL,
-                                        urlString: file.url.absoluteString,
-                                        total: total,
-                                        etag: etag,
-                                        chunkCount: chunkCount)
-        if let resume = previous,
-           !Self.sidecarFits(resume, total: total, chunkCount: chunkCount, fileSize: existingSize) {
-            Log.write("resume sidecar does not match \(destination.lastPathComponent); restarting")
-            previous = nil
+        var offsets = Array(repeating: Int64(0), count: parallelism)
+        if let resume = Self.loadSidecar(sidecarURL, source: file.url, total: total, etag: etag),
+           Self.sidecarFits(resume, total: total, fileSize: existingSize) {
+            offsets = resume.offsets(for: parallelism) ?? resume.chunks
         }
-
-        let resumedBytes = previous?.chunks.reduce(0, +) ?? 0
+        let chunkCount = offsets.count
+        let resumedBytes = offsets.reduce(0, +)
         try Self.checkCapacity(for: total - resumedBytes, at: destination)
         if !fm.fileExists(atPath: destination.path) {
             fm.createFile(atPath: destination.path, contents: nil)
@@ -270,7 +298,7 @@ public actor FileFetcher {
         for index in 0..<chunkCount {
             let start = Int64(index) * base
             let end = index == chunkCount - 1 ? total - 1 : start + base - 1
-            let already = previous?.chunks[index] ?? 0
+            let already = offsets[index]
             ranges.append((start, end, already))
             gate.add(Int(already))
         }
@@ -278,9 +306,8 @@ public actor FileFetcher {
         // Seed the coordinator with resumed bytes, otherwise the next sidecar
         // snapshot would forget them and the following resume would restart
         // completed chunks.
-        let coordinator = ChunkCoordinator(seeded: ranges.map(\.already))
-        let sidecarWriter = SidecarWriter(url: sidecarURL, source: file.url, coordinator: coordinator,
-                                          count: chunkCount)
+        let coordinator = ChunkCoordinator(seeded: offsets)
+        let sidecarWriter = SidecarWriter(url: sidecarURL, source: file.url, coordinator: coordinator)
         sidecarWriter.start(total: total, etag: etag)
 
         var succeeded = false
@@ -292,14 +319,17 @@ public actor FileFetcher {
         let rangeRequest = request
         let expectsPartial = chunkCount > 1
         try await withThrowingTaskGroup(of: Void.self) { group in
-            for (index, range) in ranges.enumerated() {
-                let start = range.start + range.already
-                if start > range.end { continue }
+            var active = 0
+            for (index, range) in ranges.enumerated() where range.already < range.end - range.start + 1 {
+                if active == parallelism { try await group.next() }
+                else { active += 1 }
+                try Task.checkCancellation()
                 group.addTask {
                     try await Self.downloadRange(
                         index: index,
-                        start: start,
+                        start: range.start + range.already,
                         end: range.end,
+                        maxRangeBytes: file.maxRangeBytes,
                         expectsPartial: expectsPartial,
                         total: total,
                         request: rangeRequest,
@@ -342,6 +372,7 @@ public actor FileFetcher {
     private static func downloadRange(index: Int,
                                       start: Int64,
                                       end: Int64,
+                                      maxRangeBytes: Int64?,
                                       expectsPartial: Bool,
                                       total: Int64,
                                       request: URLRequest,
@@ -357,13 +388,14 @@ public actor FileFetcher {
         var failures = 0
         while cursor <= end {
             try Task.checkCancellation()
+            let requestEnd = maxRangeBytes.map { cursor + min(end - cursor, max(1, $0) - 1) } ?? end
             let downloader = ChunkDownloader(
                 rangeStart: cursor,
-                rangeEnd: end,
+                rangeEnd: requestEnd,
                 request: request,
                 handle: handle,
                 limiter: limiter,
-                allowsFullBodyResponse: !expectsPartial && cursor == 0,
+                allowsFullBodyResponse: !expectsPartial && cursor == 0 && requestEnd == total - 1,
                 expectedFileSize: total,
                 onBytes: { count in
                     gate.add(count)
@@ -431,7 +463,7 @@ public actor FileFetcher {
 
         let coordinator = ChunkCoordinator(seeded: [0])
         let writer = checkpoint ? SidecarWriter(url: destination.appendingPathExtension("omni-resume"),
-                                                source: file.url, coordinator: coordinator, count: 1) : nil
+                                                source: file.url, coordinator: coordinator) : nil
         var succeeded = false
         let downloader = ChunkDownloader(rangeStart: 0, rangeEnd: -1, request: request,
                                          handle: handle, limiter: limiter, allowsFullBodyResponse: true,
@@ -477,9 +509,9 @@ public actor FileFetcher {
     // MARK: - Sidecar
 
     /// Every byte a sidecar claims must already be inside the file on disk.
-    private static func sidecarFits(_ sidecar: ResumeSidecar, total: Int64,
-                                    chunkCount: Int, fileSize: Int64) -> Bool {
-        guard chunkCount > 0 else { return false }
+    private static func sidecarFits(_ sidecar: ResumeSidecar, total: Int64, fileSize: Int64) -> Bool {
+        let chunkCount = sidecar.chunks.count
+        guard (1...16).contains(chunkCount), Int64(chunkCount) <= total else { return false }
         let base = total / Int64(chunkCount)
         for index in 0..<chunkCount {
             let start = Int64(index) * base
@@ -492,14 +524,12 @@ public actor FileFetcher {
         return true
     }
 
-    private static func loadSidecar(_ url: URL, urlString: String,
-                                    total: Int64, etag: String?,
-                                    chunkCount: Int) -> ResumeSidecar? {
+    private static func loadSidecar(_ url: URL, source: URL,
+                                    total: Int64, etag: String?) -> ResumeSidecar? {
         guard let data = try? Data(contentsOf: url),
               let sidecar = try? JSONDecoder().decode(ResumeSidecar.self, from: data),
-              sidecar.url == urlString,
-              sidecar.total == total,
-              sidecar.chunks.count == chunkCount else { return nil }
+              sidecar.matches(source),
+              sidecar.total == total else { return nil }
         // A changed ETag means the remote file is a different version; splicing
         // its new bytes onto the old half would produce a corrupt file.
         if let old = sidecar.etag, let new = etag, old != new {
@@ -514,30 +544,26 @@ public actor FileFetcher {
 }
 
 final class ChunkCoordinator: @unchecked Sendable {
-    private var bytes: [Int: Int64] = [:]
+    private var bytes: [Int64]
     private let lock = NSLock()
 
-    init(seeded: [Int64] = []) {
-        for (index, value) in seeded.enumerated() where value > 0 {
-            bytes[index] = value
-        }
-    }
+    init(seeded: [Int64]) { bytes = seeded }
 
     func add(index: Int, bytes count: Int) {
-        lock.lock(); bytes[index, default: 0] += Int64(count); lock.unlock()
+        lock.lock(); bytes[index] += Int64(count); lock.unlock()
     }
 
-    func snapshot(count: Int) -> [Int64] {
+    func snapshot() -> [Int64] {
         lock.lock(); defer { lock.unlock() }
-        return (0..<count).map { bytes[$0] ?? 0 }
+        return bytes
     }
 }
 
 private final class SidecarWriter: @unchecked Sendable {
     private let url: URL
     private let source: URL
+    private lazy var sourceID = ResumeSidecar.sourceID(source)
     private let coordinator: ChunkCoordinator
-    private let count: Int
     private let queue = DispatchQueue(label: "omnifetch.checkpoint", qos: .utility)
     private var timer: DispatchSourceTimer?
     private var total: Int64 = 0
@@ -545,11 +571,10 @@ private final class SidecarWriter: @unchecked Sendable {
 
     var hasLength: Bool { total > 0 }
 
-    init(url: URL, source: URL, coordinator: ChunkCoordinator, count: Int) {
+    init(url: URL, source: URL, coordinator: ChunkCoordinator) {
         self.url = url
         self.source = source
         self.coordinator = coordinator
-        self.count = count
     }
 
     func start(total: Int64, etag: String?) {
@@ -563,8 +588,8 @@ private final class SidecarWriter: @unchecked Sendable {
     }
 
     private func write() {
-        let sidecar = ResumeSidecar(url: source.absoluteString, total: total, etag: etag,
-                                    chunks: coordinator.snapshot(count: count))
+        let sidecar = ResumeSidecar(url: sourceID, total: total, etag: etag,
+                                    chunks: coordinator.snapshot())
         if let data = try? JSONEncoder().encode(sidecar) {
             try? data.write(to: url, options: .atomic)
         }

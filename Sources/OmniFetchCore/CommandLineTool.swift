@@ -200,7 +200,7 @@ public enum CommandLineTool {
 
     下载选项
       -o, --out <目录>             指定输出目录，默认 ~/Movies/OmniFetch
-      --connections <1–16>         设置直链分片连接数，默认 6
+      --connections <1–16>         单任务并发上限，适用于视频分片与原生图集，默认 6
       --limit-kbps <KiB/s>         设置下载限速
     """
 

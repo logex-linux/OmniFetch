@@ -74,7 +74,7 @@ public enum DirectPipeline {
 
         let bandwidth = options.bandwidth
             ?? options.extraHeaders["x-omnifetch-bandwidth"].flatMap(Int.init)
-        let connections = max(1, options.connections)
+        let connections = options.connectionLimit
 
         if options.audioOnly && audio == nil {
             guard MediaMerger.ffmpegPath() != nil else { throw EngineError.missingTool("ffmpeg") }
@@ -104,13 +104,14 @@ public enum DirectPipeline {
         let output = try MediaOutput(DownloadRequest(info: info, options: options,
                                                     destinationDirectory: destinationDirectory, baseName: baseName))
         let counter = TrackCounter()
+        let session = TransferSession.make()
+        defer { session.invalidateAndCancel() }
         @Sendable func track(_ file: RemoteFile, stem: String, connections: Int) async throws -> URL {
             let completed = output.staging.appendingPathComponent(stem + ".m4s")
             let partial = output.staging.appendingPathComponent(stem + ".part")
             let report: @Sendable (Int64, Int64) -> Void = { got, total in
-                if file.kind == .audio { counter.set(audio: got, total: total) }
-                else { counter.set(video: got, total: total) }
-                onProgress(counter.total, counter.expectedTotal)
+                let progress = counter.update(file.kind, received: got, total: total)
+                onProgress(progress.received, progress.total)
             }
             if MediaOutput.isCompleteFile(completed) {
                 let size = Int64((try completed.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0)
@@ -120,13 +121,22 @@ public enum DirectPipeline {
             let old = destinationDirectory.appendingPathComponent(".\(baseName).\(stem).part")
             FileFetcher.adoptPartial(old, at: partial, for: file)
             _ = try await FileFetcher.shared.fetch(file, to: partial, connections: connections,
-                                                   bandwidth: bandwidth, onProgress: report)
+                                                   bandwidth: bandwidth, session: session, onProgress: report)
             try FileManager.default.moveItem(at: partial, to: completed)
             return completed
         }
-        async let videoTrack = track(video, stem: "video", connections: connections)
-        async let audioTrack = track(audio, stem: "audio", connections: 1)
-        let tracks = try await (videoTrack, audioTrack)
+        let tracks: (URL, URL)
+        if connections == 1 {
+            let videoTrack = try await track(video, stem: "video", connections: 1)
+            try Task.checkCancellation()
+            tracks = (videoTrack, try await track(audio, stem: "audio", connections: 1))
+        } else {
+            let audioBudget = max(1, connections / 4)
+            let audioConnections = audio.totalBytes.map { FileFetcher.parallelism(for: $0, connections: audioBudget) } ?? audioBudget
+            async let videoTrack = track(video, stem: "video", connections: connections - audioConnections)
+            async let audioTrack = track(audio, stem: "audio", connections: audioConnections)
+            tracks = try await (videoTrack, audioTrack)
+        }
         let muxed = output.staging.appendingPathComponent("merged.mp4")
         try await MediaMerger.merge(video: tracks.0, audio: tracks.1, output: muxed)
         try Task.checkCancellation()
@@ -156,22 +166,16 @@ private final class TrackCounter: @unchecked Sendable {
     private var audioTotal: Int64 = 0
     private let lock = NSLock()
 
-    func set(video value: Int64, total: Int64) {
-        lock.lock(); video = value; videoTotal = total; lock.unlock()
-    }
-
-    func set(audio value: Int64, total: Int64) {
-        lock.lock(); audio = value; audioTotal = total; lock.unlock()
-    }
-
-    var total: Int64 {
+    func update(_ kind: FileKind, received: Int64, total: Int64) -> (received: Int64, total: Int64) {
         lock.lock(); defer { lock.unlock() }
-        return video + audio
-    }
-
-    var expectedTotal: Int64 {
-        lock.lock(); defer { lock.unlock() }
-        return videoTotal + audioTotal
+        if kind == .audio {
+            audio = received
+            audioTotal = total
+        } else {
+            video = received
+            videoTotal = total
+        }
+        return (video + audio, videoTotal + audioTotal)
     }
 }
 
@@ -188,15 +192,24 @@ enum NativeAlbum {
 
         let session = TransferSession.make()
         defer { session.invalidateAndCancel() }
-        // Keep three image requests in flight, filling each slot as it finishes.
-        // Completion order drives progress; input order determines filenames.
+        let budget = request.options.connectionLimit
+        let simultaneous = min(files.count, budget)
+        var connections = Array(repeating: 1, count: files.count)
+        if simultaneous < budget {
+            let clips = files.indices.filter { files[$0].kind != .image }
+            let spare = budget - simultaneous
+            for (rank, index) in clips.enumerated() {
+                connections[index] += spare / clips.count + (rank < spare % clips.count ? 1 : 0)
+            }
+        }
         var members = Set<URL>()
         try await withThrowingTaskGroup(of: URL.self) { group in
             func enqueue(_ position: Int) {
                 let file = files[position]
                 let destination = destinations[position]
+                let limit = connections[position]
                 group.addTask {
-                    _ = try await FileFetcher.shared.fetch(file, to: destination, connections: 1,
+                    _ = try await FileFetcher.shared.fetch(file, to: destination, connections: limit,
                                                            bandwidth: request.options.bandwidth, session: session,
                                                            onProgress: { _, _ in })
                     guard file.kind == .image, let ext = try imageExtension(of: destination),
@@ -209,7 +222,7 @@ enum NativeAlbum {
                     return corrected
                 }
             }
-            var next = min(3, files.count)
+            var next = simultaneous
             for position in 0..<next { enqueue(position) }
             while let saved = try await group.next() {
                 try Task.checkCancellation()

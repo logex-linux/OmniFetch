@@ -7,6 +7,8 @@ public struct YTDLPEngine: DownloadEngine {
 
     public init() {}
 
+    private static let sortOrder = "res,fps,vcodec:h264,acodec:aac"
+
     public func canHandle(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased() else { return false }
         return scheme == "http" || scheme == "https"
@@ -32,7 +34,12 @@ public struct YTDLPEngine: DownloadEngine {
         let cookies = try ExternalCookies(options, url: url, settings: settings)
         defer { cookies.removeFile() }
 
+        let best = Self.selector(quality: "best", audioOnly: false)
+        let preferred = Self.selector(quality: options.quality, audioOnly: options.audioOnly)
+        // Keep the preview available even when the requested height doesn't exist.
+        let probeFormat = preferred == best ? best : "(\(preferred))/(\(best))"
         var args = ["--ignore-config", "-J", "--no-warnings", "--no-playlist", "--playlist-items", "1",
+                    "-S", Self.sortOrder, "-f", probeFormat,
                     "--socket-timeout", "15", "--extractor-retries", "1"]
         if let referer = options.referer { args += ["--referer", referer] }
         if url.isOn("youtube.com"), url.path == "/playlist" { args.append("--flat-playlist") }
@@ -132,6 +139,32 @@ public struct YTDLPEngine: DownloadEngine {
         let collection = request.info.isItemCollection
         let cookies = try ExternalCookies(request.options, url: page, settings: settings)
         defer { cookies.removeFile() }
+        let staged = try FileManager.default.contentsOfDirectory(atPath: output.staging.path)
+        let externalPartial = staged.contains { $0.hasPrefix("media.") }
+        var preview = cookies.arguments.isEmpty ? await VideoPreviewCache.shared.get(request.info.extra["previewID"]) : nil
+        if preview == nil, cookies.arguments.isEmpty, !externalPartial, !collection, !request.options.audioOnly,
+           staged.contains(where: { $0.hasPrefix(".omnifetch-") && $0.hasSuffix(".part") }) {
+            let refreshed = try await probeVideo(url: page, options: request.options)
+            preview = await VideoPreviewCache.shared.get(refreshed.extra["previewID"])
+        }
+        if !externalPartial, let preview, let files = Self.parallelHTTPFiles(preview, request: request) {
+            var options = request.options
+            options.bandwidth = options.bandwidth ?? settings.bandwidthBytesPerSecond
+            do {
+                let file = try await DirectPipeline.download(files: files, options: options, destinationDirectory: output.staging,
+                                                             baseName: "native", onProgress: onProgress)
+                try Task.checkCancellation()
+                return try output.publish(file: file)
+            } catch let error as FetchError {
+                try Task.checkCancellation()
+                switch error {
+                case .rangeUnsupported, .unexpectedContent, .emptyFile: break
+                case .badStatus(let code) where code >= 500: break
+                default: throw error
+                }
+                // Keep the extractor's own transport available for incompatible responses.
+            }
+        }
         let directory = output.staging.path.replacingOccurrences(of: "%", with: "%%")
         let template = collection ? "%(playlist_index)05d-%(id)s.%(ext)s" : "media.%(ext)s"
         var args = [
@@ -142,8 +175,8 @@ public struct YTDLPEngine: DownloadEngine {
             "--print", "after_move:OMNI_FILE %(filepath)s",
             "--progress-template",
             "OMNI %(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s",
-            "--concurrent-fragments", "\(max(1, min(16, request.options.connections)))",
-            "-S", "res,fps,vcodec:h264,acodec:aac",
+            "--concurrent-fragments", "\(request.options.connectionLimit)",
+            "-S", Self.sortOrder,
             "--buffer-size", "1M", "--http-chunk-size", "10M", "--retries", "10",
             "--fragment-retries", "10", "--socket-timeout", "20", "-o", directory + "/" + template
         ]
@@ -158,7 +191,6 @@ public struct YTDLPEngine: DownloadEngine {
         }
         if let referer = request.options.referer { args += ["--referer", referer] }
         args += cookies.arguments
-        let preview = cookies.arguments.isEmpty ? await VideoPreviewCache.shared.take(request.info.extra["previewID"]) : nil
         if preview != nil { args += ["--load-info-json", "-"] }
         else { args += ["--", page.absoluteString] }
 
@@ -194,6 +226,71 @@ public struct YTDLPEngine: DownloadEngine {
     }
 
     // MARK: - Helpers
+
+    /// yt-dlp's fragment concurrency applies to manifests. A plain HTTP format
+    /// in a fresh preview can use the same verified ranges as a native video.
+    static func parallelHTTPFiles(_ preview: Data, request: DownloadRequest) -> [RemoteFile]? {
+        let options = request.options
+        guard !options.audioOnly, !request.info.isItemCollection, options.referer == nil,
+              options.extraHeaders.isEmpty, options.userAgent == nil,
+              let info = try? JSONSerialization.jsonObject(with: preview) as? [String: Any],
+              ["Youtube", "Generic", "HTML5MediaEmbed"].contains(info.str("extractor_key") ?? ""),
+              info["is_live"] as? Bool != true, info.str("live_status").map({ $0 == "not_live" || $0 == "was_live" }) ?? true,
+              (info.str("_type") ?? "video") == "video",
+              ["section_start", "section_end", "requested_ranges", "__postprocessors"].allSatisfy({ info[$0] == nil || info[$0] is NSNull }),
+              info.str("availability").map({ ["public", "unlisted"].contains($0) }) ?? true,
+              canTransferDirectly(info) else { return nil }
+
+        let formats: [[String: Any]]
+        if let id = options.formatID {
+            // Selecting a video-only ID also selects an audio track in yt-dlp.
+            guard let format = info.array("formats")?.first(where: { $0.str("format_id") == id }),
+                  let audio = format.str("acodec"), audio != "none" else { return nil }
+            formats = [format]
+        } else {
+            guard request.info.extra["formatSelector"] == Self.selector(quality: options.quality, audioOnly: false) else { return nil }
+            formats = info.array("requested_formats") ?? [info]
+            if let height = Quality.targetHeight(options.quality),
+               formats.contains(where: { ($0.int("height") ?? 0) > height }) { return nil }
+        }
+        guard (1...2).contains(formats.count) else { return nil }
+
+        var files: [RemoteFile] = []
+        for format in formats {
+            guard ["http", "https"].contains(format.str("protocol") ?? ""),
+                  let url = URL.mediaURL(format.str("url")), let size = format.int64("filesize"), size > 0,
+                  canTransferDirectly(format) else { return nil }
+            let audio = format.str("vcodec") == "none"
+            let ext = audio ? "m4a" : "mp4"
+            guard format.str("ext") == ext else { return nil }
+            let headers = format["http_headers"] as? [String: String] ?? info["http_headers"] as? [String: String] ?? [:]
+            let transport = format.dict("downloader_options") ?? [:]
+            guard transport.keys.allSatisfy({ $0 == "http_chunk_size" }) else { return nil }
+            var file = RemoteFile(url: url, headers: headers.filter { $0.key.lowercased() != "accept-encoding" },
+                                  kind: audio ? .audio : .video, fileExtension: ext, totalBytes: size)
+            if !transport.isEmpty {
+                guard let limit = transport.int64("http_chunk_size"), limit > 0 else { return nil }
+                file.maxRangeBytes = limit
+            }
+            files.append(file)
+        }
+        guard files.filter({ $0.kind == .video }).count == 1,
+              files.contains(where: { FileFetcher.parallelism(for: $0.totalBytes ?? 0, connections: 16) > 1 }) else { return nil }
+        return files
+    }
+
+    private static func canTransferDirectly(_ format: [String: Any]) -> Bool {
+        let special = ["fragments", "manifest_url", "request_data", "impersonate"]
+        let drm = format["has_drm"]
+        let available = (format["available_at"] as? NSNumber)?.doubleValue ?? 0
+        let headers = format["http_headers"] as? [String: String] ?? [:]
+        let unsupported = ["cookie", "authorization", "proxy-authorization", "range"]
+        return (drm == nil || drm is NSNull || drm as? Bool == false)
+            && special.allSatisfy { format[$0] == nil || format[$0] is NSNull }
+            && !headers.keys.contains { unsupported.contains($0.lowercased()) }
+            && ((format["stretched_ratio"] as? NSNumber)?.doubleValue ?? 1) == 1
+            && (format.str("cookies") ?? "").isEmpty && available <= Date().timeIntervalSince1970
+    }
 
     /// Builds the selector from the current download options instead of the
     /// one frozen at probe time, so changing quality/format still applies.
@@ -251,10 +348,10 @@ private actor VideoPreviewCache {
         return id
     }
 
-    func take(_ id: String?) -> Data? {
-        guard let id, let i = entries.firstIndex(where: { $0.id == id }) else { return nil }
-        let entry = entries.remove(at: i)
-        return entry.expiry > ProcessInfo.processInfo.systemUptime ? entry.json : nil
+    func get(_ id: String?) -> Data? {
+        let now = ProcessInfo.processInfo.systemUptime
+        entries.removeAll { $0.expiry <= now }
+        return entries.first { $0.id == id }?.json
     }
 }
 

@@ -14,11 +14,12 @@ import sys
 import tempfile
 import threading
 import time
+from benchmark import FixtureServer, MIB
 
 
-def run_app(binary, url, destination, env, success=True, legacy=False):
+def run_app(binary, url, destination, env, success=True, legacy=False, flags=()):
     command = ["--download"] if legacy else ["download", "--json"]
-    result = subprocess.run([binary, *command, url, "--out", destination], env=env,
+    result = subprocess.run([binary, *command, url, "--out", destination, *flags], env=env,
                             capture_output=True, text=True, timeout=60)
     if (result.returncode == 0) != success:
         raise AssertionError(result.stdout[-1300:] + result.stderr[-300:])
@@ -164,14 +165,82 @@ else:
     print("PASS empty gallery falls back to video, failed collection stays private, retry publishes exactly two files")
 
 
+def check_parallel_http(binary, baseline, rounds, work, env):
+    # The first invocation supplies a repeatable extractor response. All later
+    # yt-dlp downloads, HTTP transfers and ffmpeg merges use the real programs.
+    fake = work / "http-bin"
+    fake.mkdir()
+    wrapper = fake / "yt-dlp"
+    wrapper.write_text(f"#!{sys.executable}\n" + """
+import os, sys
+from pathlib import Path
+if '-J' in sys.argv:
+    print(Path(os.environ['FIXTURE_INFO']).read_text())
+else:
+    exe = os.environ['FIXTURE_YTDLP']
+    os.execv(exe, [exe, *sys.argv[1:]])
+""")
+    wrapper.chmod(0o755)
+    metadata = work / "public-video.json"
+    custom = {**env, "PATH": str(fake) + os.pathsep + env["PATH"], "FIXTURE_INFO": str(metadata),
+              "FIXTURE_YTDLP": shutil.which("yt-dlp")}
+    source = (work / "source.mp4").read_bytes()
+    # Both the 256 KiB prefix and the complete 6 MiB file are valid MP4s.
+    for size in [MIB // 4, 6 * MIB]:
+        padding = size - len(source)
+        source += padding.to_bytes(4, "big") + b"free" + bytes(padding - 8)
+    clip = work / "padded.mp4"
+    clip.write_bytes(source)
+    versions = {"before": baseline, "after": binary} if baseline else {"after": binary}
+    with FixtureServer(clip) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            root = f"http://127.0.0.1:{server.server_port}"
+            page = root + "/watch"
+            video = dict(format_id="18", url=root + "/short.mp4", protocol="http", ext="mp4",
+                         vcodec="avc1", acodec="aac", height=90, filesize=len(source),
+                         downloader_options={"http_chunk_size": 2 * MIB})
+            info = dict(id="test", title="HTTP test", extractor="youtube", extractor_key="Youtube", webpage_url=page)
+            metadata.write_text(json.dumps({**info, **video, "formats": [video]}))
+            times = collections.defaultdict(list)
+            peaks = collections.defaultdict(list)
+            for iteration in range(rounds):
+                for name in reversed(versions) if iteration % 2 else versions:
+                    server.reset_counts()
+                    start = time.monotonic()
+                    output = run_app(versions[name], page, work / f"http-{name}-{iteration}", custom,
+                                     legacy=name == "before", flags=("--connections", "8"))
+                    times[name].append(time.monotonic() - start)
+                    assert output.read_bytes() == source
+                    peaks[name].append(server.peak)
+                    if name == "after":
+                        assert server.peak == 3, (name, server.peak)
+            for name, samples in times.items():
+                print(f"HTTP preview {name}: median {statistics.median(samples):.3f} s, peak {max(peaks[name])}, identical bytes")
+            tracks = [{**video, "format_id": "137", "acodec": "none"},
+                      dict(format_id="140", url=root + "/small.m4a", protocol="http", ext="m4a",
+                           vcodec="none", acodec="aac", filesize=MIB // 4)]
+            metadata.write_text(json.dumps({**info, "requested_formats": tracks, "formats": tracks}))
+            for slots in (1, 8):
+                server.reset_counts()
+                output = run_app(binary, page, work / f"mux-{slots}", custom, flags=("--connections", str(slots)))
+                streams = subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type",
+                                                   "-of", "csv=p=0", output], text=True).splitlines()
+                assert sorted(streams) == ["audio", "video"] and 1 <= server.peak <= slots
+                assert slots == 1 or server.peak >= 3
+            print("PASS selected HTTP tracks share the configured budget and produce playable video and audio")
+        finally:
+            server.shutdown()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=Path(__file__).resolve().parents[1] / ".build/release/omnifetch")
     parser.add_argument("--baseline", type=Path, help="previous OmniFetch executable")
     parser.add_argument("--rounds", type=int, default=3)
     args = parser.parse_args()
-    if args.rounds < 1 or not all(shutil.which(tool) for tool in ["ffmpeg", "yt-dlp"]):
-        parser.error("requires ffmpeg, yt-dlp on PATH and at least one round")
+    if args.rounds < 1 or not all(shutil.which(tool) for tool in ["ffmpeg", "ffprobe", "yt-dlp"]):
+        parser.error("requires ffmpeg, ffprobe and yt-dlp on PATH and at least one round")
     with tempfile.TemporaryDirectory(prefix="omnifetch-social-") as tmp:
         work = Path(tmp)
         home = work / "home"
@@ -180,7 +249,9 @@ def main():
         for name in ["OMNI_COOKIE", "OMNIFETCH_X_BEARER_TOKEN"]:
             env.pop(name, None)
         binary = args.binary.resolve()
-        check_preview_reuse(binary, args.baseline.resolve() if args.baseline else None, args.rounds, work, env)
+        baseline = args.baseline.resolve() if args.baseline else None
+        check_preview_reuse(binary, baseline, args.rounds, work, env)
+        check_parallel_http(binary, baseline, args.rounds, work, env)
         check_collection_retry(binary, work, env)
 
 

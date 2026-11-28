@@ -137,15 +137,15 @@ public enum SelfTest {
 
         // 1b. Resume bookkeeping must keep bytes already on disk.
         check("resume seed",
-              ChunkCoordinator(seeded: [1_024, 2_048, 0]).snapshot(count: 3) == [1_024, 2_048, 0])
+              ChunkCoordinator(seeded: [1_024, 2_048, 0]).snapshot() == [1_024, 2_048, 0])
 
         // 1c. Bytes written during this session add to the seeded ones; a
         //     finished chunk must not drop the part that was already on disk.
         let seededCoordinator = ChunkCoordinator(seeded: [1_000, 0])
         seededCoordinator.add(index: 0, bytes: 500)
         check("resume accounting",
-              seededCoordinator.snapshot(count: 2) == [1_500, 0],
-              "\(seededCoordinator.snapshot(count: 2))")
+              seededCoordinator.snapshot() == [1_500, 0],
+              "\(seededCoordinator.snapshot())")
 
         // 2. Parallel range download against a local server
         let tempDirectory = FileManager.default.temporaryDirectory
@@ -208,6 +208,8 @@ public enum SelfTest {
                 from: Data(contentsOf: slowOutput.appendingPathExtension("omni-resume")))
             let saved = streamCheckpoint.chunks.first ?? 0
             check("stream pause saves committed bytes", saved > 0 && saved < Int64(size))
+            check("checkpoint stores source fingerprint", streamCheckpoint.url.hasPrefix("sha256:") &&
+                  !streamCheckpoint.url.contains(remote.absoluteString))
             localServer.mode = .normal
             let beforeResume = localServer.bytesServed
             _ = try await FileFetcher.shared.fetch(RemoteFile(url: remote), to: slowOutput,
@@ -236,6 +238,30 @@ public enum SelfTest {
             check("resume integrity", (try? sha256(of: output)) == (try? sha256(of: sourceURL)))
             check("resume skips finished chunks", served < Int64(size) - chunk,
                   "served \(served) of \(size)")
+
+            // Version-one checkpoints store prefixes of equal-width ranges.
+            // Reconfigure while paused, including a grid with disjoint bytes.
+            for (label, offsets, limit) in [("raise", [chunk + 137], 6), ("lower", [0, chunk / 2, 2137, chunk], 1)] {
+                let changed = tempDirectory.appendingPathComponent("change-\(label).bin")
+                try FileManager.default.copyItem(at: sourceURL, to: changed)
+                let record = ResumeFixture.make(url: remote.absoluteString, total: Int64(size), chunks: offsets)
+                try JSONEncoder().encode(record).write(to: changed.appendingPathExtension("omni-resume"))
+                let before = localServer.bytesServed
+                _ = try await FileFetcher.shared.fetch(RemoteFile(url: remote), to: changed, connections: limit,
+                                                       bandwidth: nil, onProgress: { _, _ in })
+                check("\(label) concurrency preserves all checkpointed bytes",
+                      localServer.bytesServed - before == Int64(size) - offsets.reduce(0, +) + 1 &&
+                      (try? sha256(of: changed)) == (try? sha256(of: sourceURL)))
+            }
+
+            var bounded = RemoteFile(url: remote, totalBytes: Int64(size))
+            bounded.maxRangeBytes = 3 * 1024 * 1024
+            let boundedOutput = tempDirectory.appendingPathComponent("bounded.bin")
+            let beforeBounded = localServer.requestCount
+            _ = try await FileFetcher.shared.fetch(bounded, to: boundedOutput, connections: 1,
+                                                   bandwidth: nil, onProgress: { _, _ in })
+            check("honors extractor maximum range size", localServer.requestCount - beforeBounded == 9 &&
+                  (try? sha256(of: boundedOutput)) == (try? sha256(of: sourceURL)))
 
             // 3b. A sidecar whose bytes are no longer on disk must be ignored,
             //     otherwise the file would be filled with zero holes.

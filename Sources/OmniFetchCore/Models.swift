@@ -34,6 +34,8 @@ public struct RemoteFile: Codable, Hashable, Sendable {
     public var kind: FileKind
     public var fileExtension: String
     public var totalBytes: Int64?
+    /// Maximum HTTP range length specified by the source extractor.
+    var maxRangeBytes: Int64?
 
     public init(url: URL, headers: [String: String] = [:], kind: FileKind = .video,
                 fileExtension: String = "mp4", totalBytes: Int64? = nil,
@@ -141,7 +143,8 @@ public struct DownloadOptions: Codable, Hashable, Sendable {
     public var useXHSAppSession: Bool?
     public var audioOnly: Bool
     public var quality: String          // best / 2160 / 1080 / 720 / 480
-    public var connections: Int         // parallel HTTP ranges
+    public var connections: Int
+    var connectionLimit: Int { max(1, min(16, connections)) }
     public var cookieHeader: String?
     public var cookiesFromBrowser: String?
     public var referer: String?
