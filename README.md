@@ -1,8 +1,20 @@
 # OmniFetch
 
-OmniFetch 是视频、音频和图集的命令行下载工具。它接受单条链接、批量链接和平台分享文案。B 站、小红书和微信视频号有专门的解析流程，X、YouTube 及其他站点由视频和图集引擎处理。
+OmniFetch 是视频、音频和图集的多端下载工具（支持 macOS SwiftUI、Windows Qt 6 桌面端与命令行 CLI）。它接受单条链接、批量链接和平台分享文案，针对 B 站、小红书和微信视频号提供专门解析，X、YouTube 及其他站点由视频和图集引擎处理。
 
-## 快速开始
+## 下载（Releases 发布版）
+
+前往 [GitHub Releases (v1.0.0)](https://github.com/logex-linux/OmniFetch/releases/tag/v1.0.0) 直接下载已封装安装包：
+
+| 平台 | 下载文件 | 中文说明 |
+|---|---|---|
+| **macOS 14+** | [OmniFetch-1.0.0-universal.dmg](https://github.com/logex-linux/OmniFetch/releases/download/v1.0.0/OmniFetch-1.0.0-universal.dmg) | macOS 通用磁盘镜像安装包（Apple Silicon + Intel 芯片均支持，打开拖入「应用程序」即可） |
+| **Windows 10/11 (x64)** | [OmniFetch-1.0.0-windows-x64.exe](https://github.com/logex-linux/OmniFetch/releases/download/v1.0.0/OmniFetch-1.0.0-windows-x64.exe) | Windows 64 位独立可执行程序（Qt 6 桌面版，无需安装 Python，双击直接运行） |
+| **校验文件** | [SHA256SUMS.txt](https://github.com/logex-linux/OmniFetch/releases/download/v1.0.0/SHA256SUMS.txt) / [SHA256SUMS-windows.txt](https://github.com/logex-linux/OmniFetch/releases/download/v1.0.0/SHA256SUMS-windows.txt) | macOS 与 Windows 安装包的 SHA-256 完整性校验码 |
+
+> 首次打开提示：macOS 版为 ad-hoc 签名，如遇系统拦截请右键「打开」或执行 `xattr -dr com.apple.quarantine /Applications/OmniFetch.app`；Windows 版未做商业代码签名，SmartScreen 提示时点击「更多信息 → 仍要运行」即可。
+
+## 快速开始（命令行 CLI）
 
 当前 CLI 支持 macOS 14+，构建需要 Swift 5.9 或更新版本。请在仓库目录运行以下命令。
 
